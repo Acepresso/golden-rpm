@@ -1,0 +1,117 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE_REGISTRY: ghcr.io
+  # IMAGE_REPO: ${{ github.repository_owner }}/golden-rpm
+  IMAGE_REPO: acepresso/golden-rpm
+  IMAGE_TAGS: ${{ github.sha }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      # Needed for signing with GitHub OIDC Token
+      id-token: write
+      # Needed to push to ghcr.io registry
+      packages: write
+
+    outputs:
+      rpm-file: ${{ steps.build-rpm.outputs.rpm-file }}
+      image:  ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPO }}
+      digest: ${{ steps.push-image.outputs.digest }}
+
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+    - name: Install Cosign
+      uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+    - name: Install Syft
+      uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+
+    - name: Install ORAS
+      uses: oras-project/setup-oras@v1
+
+    - name: Log in to ghcr
+      uses: redhat-actions/podman-login@4934294ad0449894bcd1e9f191899d7292469603 # v1
+      with:
+        registry: ${{ env.IMAGE_REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y rpm make
+
+    - name: Build RPM
+      id: build-rpm
+      run: |
+        make build
+        RPM_PATH=$(find ./rpmbuild/RPMS/noarch -name "*.rpm" -type f)
+        RPM_FILE=$(basename $RPM_PATH)
+        cp "$RPM_PATH" .
+        echo "rpm-file=$RPM_FILE" >> $GITHUB_OUTPUT
+
+    - name: Push to ghcr
+      id: push-image
+      run: |
+        oras push --artifact-type application/vnd.rpm.config.v1+json \
+          ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.sha }} \
+          "${{ steps.build-rpm.outputs.rpm-file }}":application/vnd.rpm.layer.v1+rpm
+        DIGEST=$(oras digest ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.sha }})
+        echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+
+    - name: Sign image with GitHub OIDC Token
+      run: cosign sign --yes ${IMAGE_REGISTRY}/${IMAGE_REPO}@${DIGEST}
+      env:
+        DIGEST: ${{ steps.push-image.outputs.digest }}
+    
+    - name: Generate and store SBOM
+      run: |
+          syft "${{ steps.build-rpm.outputs.rpm-file }}" -o spdx-json=sbom-spdx.json
+          cosign attest --yes --predicate sbom-spdx.json --type spdxjson "${IMAGE_REGISTRY}/${IMAGE_REPO}@${DIGEST}"
+      env:
+        DIGEST: ${{ steps.push-image.outputs.digest }}
+
+  provenance:
+    needs: [build]
+    permissions:
+      actions: read # for detecting the Github Actions environment.
+      id-token: write # for creating OIDC tokens for signing.
+      packages: write # for uploading attestations.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0 
+    with:
+      image: ${{ needs.build.outputs.image }}
+      digest: ${{ needs.build.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+  validate:
+    needs: [provenance, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate image
+        uses: conforma/action-validate-image@v1.0.420
+        with:
+          image: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+          identity: https:\/\/github\.com\/(slsa-framework\/slsa-github-generator|${{ github.repository_owner }}\/${{ github.event.repository.name }})\/
+          issuer: https://token.actions.githubusercontent.com
+  
+  promote:
+    runs-on: ubuntu-latest
+    needs: [validate, build]
+    steps:
+      - name: Push latest-validated image tag
+        run: |
+          skopeo copy \
+          --dest-creds=${{ github.actor }}:${{ github.token }} \
+          docker://${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }} \
+          docker://${{ needs.build.outputs.image }}:latest
