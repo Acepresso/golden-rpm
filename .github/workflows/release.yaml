@@ -13,6 +13,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    container: registry.access.redhat.com/ubi9/ubi:latest
 
     permissions:
       # Needed for signing with GitHub OIDC Token
@@ -24,25 +25,24 @@ jobs:
 
     outputs:
       rpm-file: ${{ steps.build-rpm.outputs.rpm-file }}
-      rpm-path: ${{ steps.build-rpm.outputs.rpm-path }}
 
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
     - name: Install RPM build tools
       run: |
-        sudo apt-get update
-        sudo apt-get install -y rpm rpmbuild
-
+        # sudo apt-get update
+        # sudo apt-get install -y rpm rpmbuild
+        
+        dnf install -y rpm rpm-build make
     - name: Build RPM
       id: build-rpm
       run: |
         make build
-        RPM_FILE=$(find ./rpmbuild/RPMS/noarch -name "*.rpm" -type f)
-        RPM_FILENAME=$(basename $RPM_FILE)
-        echo "rpm-file=$RPM_FILENAME" >> $GITHUB_OUTPUT
-        echo "rpm-path=$RPM_FILE" >> $GITHUB_OUTPUT
-        cp "$RPM_FILENAME" .
+        RPM_PATH=$(find ./rpmbuild/RPMS/noarch -name "*.rpm" -type f)
+        RPM_FILE=$(basename $RPM_PATH)
+        cp "$RPM_PATH" .
+        echo "rpm-file=$RPM_FILE" >> $GITHUB_OUTPUT
 
     - name: Install Cosign
       uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
