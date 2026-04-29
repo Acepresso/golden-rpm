@@ -7,7 +7,12 @@ SOURCE_SCRIPT := hello.sh
 all: build
 
 generate-dirs:
-	mkdir -p $(RPMBUILD_DIR)/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+	@echo "Generating RPM build directories"
+	mkdir -p $(RPMBUILD_DIR)/BUILD
+	mkdir -p $(RPMBUILD_DIR)/RPMS
+	mkdir -p $(RPMBUILD_DIR)/SOURCES
+	mkdir -p $(RPMBUILD_DIR)/SPECS
+	mkdir -p $(RPMBUILD_DIR)/SRPMS
 
 build: generate-dirs
 	cp $(SPEC_FILE) $(RPMBUILD_DIR)/SPECS/
