@@ -11,8 +11,7 @@ concurrency:
 
 env:
   IMAGE_REGISTRY: ghcr.io
-  # IMAGE_REPO: ${{ github.repository_owner }}/golden-rpm
-  IMAGE_REPO: acepresso/golden-rpm
+  IMAGE_REPO: ${{ github.repository_owner }}/golden-rpm
   IMAGE_TAGS: ${{ github.sha }}
 
 jobs:
