@@ -6,35 +6,50 @@ on:
       - main
 
 env:
-  RPM_NAME: golden-rpm
-  RPM_VERSION: 1.0
-  RPM_RELEASE: 1
+  IMAGE_REGISTRY: ghcr.io
+  # IMAGE_REPO: ${{ github.repository_owner }}/golden-rpm
+  IMAGE_REPO: acepresso/golden-rpm
+  IMAGE_TAGS: ${{ github.sha }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # container: registry.access.redhat.com/ubi9/ubi:latest
 
     permissions:
       # Needed for signing with GitHub OIDC Token
       id-token: write
-      # Needed for creating releases
-      contents: write
-      # Needed for attestations
-      attestations: write
+      # Needed to push to ghcr.io registry
+      packages: write
 
     outputs:
       rpm-file: ${{ steps.build-rpm.outputs.rpm-file }}
+      image:  ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPO }}
+      digest: ${{ steps.push-image.outputs.digest }}
 
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-    - name: Install RPM build tools
+    - name: Install Cosign
+      uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+    - name: Install Syft
+      uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+
+    - name: Install ORAS
+      uses: oras-project/setup-oras@v1
+
+    - name: Log in to ghcr
+      uses: redhat-actions/podman-login@4934294ad0449894bcd1e9f191899d7292469603 # v1
+      with:
+        registry: ${{ env.IMAGE_REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Install Dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y rpm make
-        
-        # dnf install -y rpm rpm-build make
+
     - name: Build RPM
       id: build-rpm
       run: |
@@ -44,74 +59,49 @@ jobs:
         cp "$RPM_PATH" .
         echo "rpm-file=$RPM_FILE" >> $GITHUB_OUTPUT
 
-    - name: Install Cosign
-      uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
-
-    - name: Sign RPM with GitHub OIDC Token
+    - name: Push to ghcr
+      id: push-image
       run: |
-        cosign sign-blob --yes \
-          --bundle="${{ steps.build-rpm.outputs.rpm-file }}.cosign.bundle" \
-          "${{ steps.build-rpm.outputs.rpm-file }}"
+        oras push --artifact-type application/vnd.rpm.config.v1+json \
+          ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.sha }} \
+          "${{ steps.build-rpm.outputs.rpm-file }}":application/vnd.rpm.layer.v1+rpm
+        DIGEST=$(oras digest ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.sha }})
+        echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
-    - name: Install Syft
-      uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-
-    - name: Generate SBOM
+    - name: Sign image with GitHub OIDC Token
+      run: cosign sign --yes ${IMAGE_REGISTRY}/${IMAGE_REPO}@${DIGEST}
+      env:
+        DIGEST: ${{ steps.push-image.outputs.digest }}
+    
+    - name: Generate and store SBOM
       run: |
-        syft "${{ steps.build-rpm.outputs.rpm-file }}" -o spdx-json=sbom-spdx.json
+          syft "${IMAGE_REGISTRY}/${IMAGE_REPO}@${DIGEST}" -o spdx-json=sbom-spdx.json
+          cosign attest --yes --predicate sbom-spdx.json --type spdxjson "${IMAGE_REGISTRY}/${IMAGE_REPO}@${DIGEST}"
+      env:
+        DIGEST: ${{ steps.push-image.outputs.digest }}
 
-    - name: Attest SBOM
-      run: |
-        cosign attest-blob --yes \
-          --bundle="${{ steps.build-rpm.outputs.rpm-file }}.sbom.bundle" \
-          --predicate sbom-spdx.json \
-          --type spdxjson \
-          "${{ steps.build-rpm.outputs.rpm-file }}"
-
-    - name: Upload RPM as artifact
-      uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.5.0
-      with:
-        name: ${{ steps.build-rpm.outputs.rpm-file }}
-        path: |
-          ${{ steps.build-rpm.outputs.rpm-file }}
-          ${{ steps.build-rpm.outputs.rpm-file }}.cosign.bundle
-          ${{ steps.build-rpm.outputs.rpm-file }}.sbom.bundle
-          sbom-spdx.json
-
-    - name: Create Release
-      uses: softprops/action-gh-release@d99959edae48b5ffffd7b00da66dcdb0a33a52ee # v2.2.0
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        files: |
-          ${{ steps.build-rpm.outputs.rpm-file }}
-          ${{ steps.build-rpm.outputs.rpm-file }}.cosign.bundle
-          ${{ steps.build-rpm.outputs.rpm-file }}.sbom.bundle
-          sbom-spdx.json
+  provenance:
+    needs: [build]
+    permissions:
+      actions: read # for detecting the Github Actions environment.
+      id-token: write # for creating OIDC tokens for signing.
+      packages: write # for uploading attestations.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0 
+    with:
+      image: ${{ needs.build.outputs.image }}
+      digest: ${{ needs.build.outputs.digest }}
+      registry-username: ${{ github.actor }}
+    secrets:
+      registry-password: ${{ secrets.GITHUB_TOKEN }}
 
   validate:
-    needs: [build]
+    needs: [provenance, build]
     runs-on: ubuntu-latest
     steps:
-      - name: Download RPM artifact
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+      - name: Validate image
+        uses: conforma/action-validate-image@v1.0.420
         with:
-          name: ${{ needs.build.outputs.rpm-file }}
-
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
-
-      - name: Verify signature
-        run: |
-          cosign verify-blob \
-            --bundle="${{ needs.build.outputs.rpm-file }}.cosign.bundle" \
-            --certificate-identity=https://github.com/${{ github.repository }}/.github/workflows/release.yaml@${{ github.ref }} \
-            --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
-            "${{ needs.build.outputs.rpm-file }}"
-
-      - name: Verify SBOM attestation
-        run: |
-          cosign verify-blob-attestation \
-            --bundle="${{ needs.build.outputs.rpm-file }}.sbom.bundle" \
-            --certificate-identity=https://github.com/${{ github.repository }}/.github/workflows/release.yaml@${{ github.ref }} \
-            --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
-            "${{ needs.build.outputs.rpm-file }}"
+          image: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+          identity: https:\/\/github\.com\/(slsa-framework\/slsa-github-generator|${{ github.repository_owner }}\/${{ github.event.repository.name }})\/
+          issuer: https://token.actions.githubusercontent.com
+  
