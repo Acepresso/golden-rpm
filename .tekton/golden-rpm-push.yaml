@@ -1,0 +1,51 @@
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  annotations:
+    build.appstudio.openshift.io/repo: '{{ source_url }}/tree/{{ revision }}'
+    build.appstudio.redhat.com/commit_sha: '{{ revision }}'
+    build.appstudio.redhat.com/target_branch: '{{ target_branch }}'
+    pipelinesascode.tekton.dev/max-keep-runs: "3"
+    pipelinesascode.tekton.dev/on-cel-expression: event == "push" && files.all.exists(x, x.matches('^\\.tekton/') || x.matches('^.*\\.spec$') || x.matches('^src/'))
+  creationTimestamp: null
+  labels:
+    appstudio.openshift.io/application: golden-rpm
+    appstudio.openshift.io/component: golden-rpm
+    pipelines.appstudio.openshift.io/type: build
+  name: golden-rpm-on-push
+  namespace: rhtap-contract-tenant
+spec:
+  params:
+    - name: package-name
+      value: golden-rpm
+    - name: git-url
+      value: "{{ source_url }}"
+    - name: revision
+      value: "{{ revision }}"
+    - name: target-branch
+      value: "{{ target_branch }}"
+    - name: ociStorage
+      value: quay.io/redhat-user-workloads/rhtap-contract-tenant/golden-rpm/golden-rpm:{{ revision }}
+    - name: build-architectures
+      value:
+        - x86_64
+    - name: self-ref-url
+      value: &pipeline-url "https://gitlab.cee.redhat.com/rhel-on-konflux/rpmbuild-pipeline.git"
+    - name: self-ref-revision
+      value: &pipeline-rev e83c633606afd6ea11d8188b87219448488ec4c3
+  pipelineRef:
+    resolver: git
+    params:
+      - name: url
+        value: *pipeline-url
+      - name: revision
+        value: *pipeline-rev
+      - name: pathInRepo
+        value: pipeline/build-rhel-package.yaml
+  taskRunTemplate:
+    serviceAccountName: build-pipeline-golden-rpm
+  workspaces:
+    - name: git-auth
+      secret:
+        secretName: '{{ git_auth_secret }}'
