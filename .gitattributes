@@ -1,0 +1,2 @@
+# Exclude tarballs from git archive to avoid self-reference
+*.tar.gz export-ignore
