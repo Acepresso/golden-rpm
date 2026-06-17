@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - '*.spec'
+      - 'Makefile'
+      - 'golden-rpm.tar.gz'
+
+permissions:
+  contents: read
+
+jobs:
+  check-tarball:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Verify tarball is up to date
+        run: |
+          tar -xzf golden-rpm.tar.gz --strip-components=1
+
+          if ! git diff --quiet; then
+            echo "❌ ERROR: Tarball contents don't match working tree!"
+            echo ""
+            echo "Differences found:"
+            git diff --stat
+            echo ""
+            echo "The committed golden-rpm.tar.gz is out of sync with the source files."
+            echo "Please run the following commands and commit the result:"
+            echo ""
+            echo "  make tarball"
+            echo "  git add golden-rpm.tar.gz"
+            echo "  git commit -m 'Update source tarball'"
+            echo ""
+            exit 1
+          fi
+
+          echo "✅ Tarball is up-to-date"
